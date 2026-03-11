@@ -401,9 +401,26 @@ def scan_media_files_logic(root_path, output_file, status_callback, progress_cal
     return f"Hoàn thành! Đã quét và ghi lại {processed_count} file.", processed_count, dict(folder_summary)
 
 
-# ==============================================================================
-# PHẦN GIAO DIỆN ĐỒ HỌA (GUI)
-# ==============================================================================
+def get_output_dir():
+    """
+    Trả về thư mục an toàn để ghi file output, theo từng OS:
+    - Windows : thư mục chứa exe / script
+    - macOS   : ~/Desktop (thư mục app bị sandbox, không ghi được)
+    - Linux   : thư mục chứa script
+    """
+    if IS_MACOS:
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        if os.path.isdir(desktop):
+            return desktop
+        return os.path.expanduser("~")  # fallback: home dir
+    else:
+        # Windows / Linux: ghi cạnh file exe hoặc script
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__)) or os.getcwd()
+
+
+
 
 class MediaScannerApp:
     def __init__(self, root):
@@ -1078,7 +1095,8 @@ class MediaScannerApp:
         if ":" in drive_name:
             drive_name = drive_name.replace(":", "")
         dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_filename = f"logfile+{drive_name}_{dt_str}.txt"
+        filename    = f"logfile+{drive_name}_{dt_str}.txt"
+        output_filename = os.path.join(get_output_dir(), filename)
 
         scan_thread = threading.Thread(
             target=self.run_scan_in_background,
