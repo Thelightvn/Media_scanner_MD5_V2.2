@@ -3,12 +3,12 @@ name: Build Windows & macOS
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:          # Cho phép chạy thủ công từ tab Actions
+  workflow_dispatch:
 
 jobs:
 
   # ============================================================
-  # JOB 1: BUILD WINDOWS (.exe)
+  # JOB 1: BUILD WINDOWS (.exe) + bundle ffprobe.exe
   # ============================================================
   build-windows:
     runs-on: windows-latest
@@ -22,18 +22,36 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: |
-          pip install pyinstaller openpyxl
+      - name: Install Python dependencies
+        run: pip install pyinstaller openpyxl
 
-      - name: Build EXE (one-dir)
+      - name: Download ffprobe (Windows x64)
+        run: |
+          curl -L "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -o ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
+          $ffprobe = Get-ChildItem -Path ffmpeg_tmp -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          Copy-Item $ffprobe.FullName .\ffprobe.exe
+          Write-Host "ffprobe.exe ready: $(.\ffprobe.exe -version 2>&1 | Select-Object -First 1)"
+
+      - name: Build EXE (one-dir) + bundle ffprobe
         run: |
           pyinstaller --onedir --windowed `
             --name "Media_Scanner_MD5_V2" `
+            --add-binary "ffprobe.exe;." `
             --hidden-import openpyxl `
             --hidden-import openpyxl.styles `
             --hidden-import openpyxl.utils `
             Media_Scanner_MD5_V2.py
+
+      - name: Verify build output
+        run: |
+          Write-Host "=== dist folder contents ==="
+          Get-ChildItem dist\Media_Scanner_MD5_V2\ | Select-Object Name
+          if (Test-Path "dist\Media_Scanner_MD5_V2\ffprobe.exe") {
+            Write-Host "OK: ffprobe.exe bundled"
+          } else {
+            Write-Host "WARNING: ffprobe.exe not found"
+          }
 
       - name: Zip Windows output
         run: |
@@ -48,7 +66,8 @@ jobs:
           retention-days: 30
 
   # ============================================================
-  # JOB 2: BUILD MACOS (.app)
+  # JOB 2: BUILD MACOS (.app) + bundle ffprobe
+  # macos-latest = arm64 (Apple Silicon)
   # ============================================================
   build-macos:
     runs-on: macos-latest
@@ -62,18 +81,35 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: |
-          pip install pyinstaller openpyxl
+      - name: Install Python dependencies
+        run: pip install pyinstaller openpyxl
 
-      - name: Build macOS App (one-dir)
+      - name: Download ffprobe (macOS arm64 - Apple Silicon)
+        run: |
+          # martin-riedl.de: static build, signed, arm64
+          curl -L "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffprobe.zip" \
+               -o ffprobe.zip
+          unzip -o ffprobe.zip
+          chmod +x ffprobe
+          echo "ffprobe ready: $(./ffprobe -version 2>&1 | head -1)"
+
+      - name: Build macOS App (one-dir) + bundle ffprobe
         run: |
           pyinstaller --onedir --windowed \
             --name "Media_Scanner_MD5_V2" \
+            --add-binary "ffprobe:." \
             --hidden-import openpyxl \
             --hidden-import openpyxl.styles \
             --hidden-import openpyxl.utils \
             Media_Scanner_MD5_V2.py
+
+      - name: Verify build output
+        run: |
+          echo "=== Tìm ffprobe trong dist ==="
+          find dist -name "ffprobe" 2>/dev/null && echo "OK: ffprobe bundled" || echo "WARNING: not found"
+          echo "=== Contents of .app/Contents/MacOS ==="
+          ls dist/Media_Scanner_MD5_V2.app/Contents/MacOS/ 2>/dev/null || \
+          ls dist/Media_Scanner_MD5_V2/ 2>/dev/null || true
 
       - name: Zip macOS output
         run: |
