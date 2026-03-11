@@ -75,18 +75,55 @@ def calculate_md5(file_path, chunk_size=8 * 1024 * 1024):
         return f"ERR:{e}"
 
 
+def get_ffprobe_path():
+    """
+    Tìm ffprobe theo thứ tự ưu tiên:
+    1. Cùng thư mục với exe (bundled bởi PyInstaller)
+    2. Thư mục _internal (PyInstaller --onedir)
+    3. sys._MEIPASS (PyInstaller --onefile)
+    4. PATH của hệ thống
+    """
+    ffprobe_name = "ffprobe.exe" if IS_WINDOWS else "ffprobe"
+
+    # Thư mục chứa exe đang chạy
+    if getattr(sys, 'frozen', False):
+        # Đang chạy từ PyInstaller bundle
+        base_dir = os.path.dirname(sys.executable)
+        candidates = [
+            os.path.join(base_dir, ffprobe_name),                        # cùng thư mục exe
+            os.path.join(base_dir, "_internal", ffprobe_name),           # thư mục _internal
+            os.path.join(getattr(sys, '_MEIPASS', base_dir), ffprobe_name),  # onefile temp
+        ]
+    else:
+        # Đang chạy từ source .py
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(base_dir, ffprobe_name),   # cùng thư mục script
+        ]
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+
+    # Fallback: tìm trong PATH hệ thống
+    return shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+
+
 def get_media_duration(file_path):
     """Lấy thời lượng file media. Trả về None cho DPX/CRI vì xử lý riêng."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext in DPX_CRI_EXTENSIONS:
         return None
 
+    ffprobe = get_ffprobe_path()
+    if not ffprobe:
+        return None
+
     command = [
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        ffprobe, "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", file_path
     ]
     try:
-        # STARTUPINFO chỉ tồn tại trên Windows — ẩn cửa sổ console khi spawn ffprobe
         kwargs = dict(
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, check=False, encoding='utf-8', errors='ignore'
@@ -102,7 +139,6 @@ def get_media_duration(file_path):
         return result.stdout.strip()
 
     except FileNotFoundError:
-        print("CRITICAL ERROR: ffprobe not found!")
         return None
     except Exception as e:
         print(f"An unexpected error occurred in get_media_duration: {e}")
@@ -1065,30 +1101,21 @@ class MediaScannerApp:
 # ==============================================================================
 
 def check_ffprobe():
-    if shutil.which("ffprobe") is None:
-        ans = messagebox.askyesno(
-            "Không tìm thấy FFmpeg",
-            "ffprobe không được tìm thấy trong PATH.\n\n"
-            "Chương trình vẫn có thể chạy nhưng:\n"
-            "  • Cột Thời lượng sẽ hiển thị N/A\n"
-            "  • Option 'Lấy thời lượng bằng ffprobe' sẽ bị tắt\n\n"
-            "Bạn có muốn tiếp tục không?"
-        )
-        return ans  # True = tiếp tục, False = thoát
-    return True
+    return get_ffprobe_path() is not None
 
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = MediaScannerApp(root)
-    # Nếu ffprobe không có trong PATH → tắt checkbox và cảnh báo
-    if shutil.which("ffprobe") is None:
+    # Nếu ffprobe không tìm thấy (bundled hoặc PATH) → tắt checkbox và cảnh báo
+    if not check_ffprobe():
         app.ffprobe_var.set(False)
         messagebox.showwarning(
             "Không tìm thấy FFmpeg",
-            "ffprobe không được tìm thấy trong PATH.\n\n"
+            "ffprobe không được tìm thấy.\n\n"
             "Option 'Lấy thời lượng bằng ffprobe' đã được tắt tự động.\n"
             "Cột Thời lượng sẽ hiển thị N/A.\n\n"
-            "Để bật lại: cài FFmpeg và thêm vào PATH, sau đó khởi động lại."
+            "Để bật lại: đặt ffprobe cùng thư mục với chương trình,\n"
+            "hoặc cài FFmpeg và thêm vào PATH."
         )
     root.mainloop()
