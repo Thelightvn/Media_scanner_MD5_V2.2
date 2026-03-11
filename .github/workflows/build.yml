@@ -1,0 +1,88 @@
+name: Build Windows & macOS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:          # Cho phép chạy thủ công từ tab Actions
+
+jobs:
+
+  # ============================================================
+  # JOB 1: BUILD WINDOWS (.exe)
+  # ============================================================
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller openpyxl
+
+      - name: Build EXE (one-dir)
+        run: |
+          pyinstaller --onedir --windowed `
+            --name "Media_Scanner_MD5_V2" `
+            --hidden-import openpyxl `
+            --hidden-import openpyxl.styles `
+            --hidden-import openpyxl.utils `
+            Media_Scanner_MD5_V2.py
+
+      - name: Zip Windows output
+        run: |
+          Compress-Archive -Path dist\Media_Scanner_MD5_V2 `
+            -DestinationPath dist\Media_Scanner_MD5_V2_Windows.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Media_Scanner_MD5_V2_Windows
+          path: dist\Media_Scanner_MD5_V2_Windows.zip
+          retention-days: 30
+
+  # ============================================================
+  # JOB 2: BUILD MACOS (.app)
+  # ============================================================
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller openpyxl
+
+      - name: Build macOS App (one-dir)
+        run: |
+          pyinstaller --onedir --windowed \
+            --name "Media_Scanner_MD5_V2" \
+            --hidden-import openpyxl \
+            --hidden-import openpyxl.styles \
+            --hidden-import openpyxl.utils \
+            Media_Scanner_MD5_V2.py
+
+      - name: Zip macOS output
+        run: |
+          cd dist
+          zip -r Media_Scanner_MD5_V2_macOS.zip Media_Scanner_MD5_V2.app
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Media_Scanner_MD5_V2_macOS
+          path: dist/Media_Scanner_MD5_V2_macOS.zip
+          retention-days: 30
