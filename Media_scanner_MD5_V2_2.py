@@ -9,51 +9,63 @@ from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 from collections import defaultdict
 
+
 # ==============================================================================
-# PLATFORM DETECTION
+# TỰ ĐỘNG TÌM / CÀI FFPROBE (macOS compatible)
 # ==============================================================================
-IS_WINDOWS = sys.platform == "win32"
-IS_MACOS   = sys.platform == "darwin"
 
-
-def get_ffprobe_path():
-    """
-    Tìm ffprobe theo thứ tự ưu tiên:
-    1. Cùng thư mục exe (PyInstaller bundle)
-    2. Thư mục _internal (PyInstaller --onedir)
-    3. sys._MEIPASS (PyInstaller --onefile)
-    4. PATH hệ thống
-    """
-    ffprobe_name = "ffprobe.exe" if IS_WINDOWS else "ffprobe"
+def _find_ffprobe_path():
+    """Tìm ffprobe: ưu tiên bundled (PyInstaller), sau đó PATH, cuối cùng imageio-ffmpeg."""
+    # 1. Khi đóng gói bằng PyInstaller, ffprobe nằm cạnh executable
     if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
-        candidates = [
-            os.path.join(base, ffprobe_name),
-            os.path.join(base, "_internal", ffprobe_name),
-            os.path.join(getattr(sys, '_MEIPASS', base), ffprobe_name),
-        ]
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-        candidates = [os.path.join(base, ffprobe_name)]
-    for p in candidates:
-        if os.path.isfile(p):
-            return p
-    return shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+        base = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
+        for name in ('ffprobe', 'ffprobe.exe'):
+            candidate = os.path.join(base, name)
+            if os.path.isfile(candidate):
+                return candidate
+
+    # 2. Thử tìm trong PATH hệ thống
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+
+    # 3. Thử cài imageio-ffmpeg để lấy ffprobe binary
+    try:
+        import imageio_ffmpeg
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
+        if os.path.isfile(ffprobe_bin):
+            return ffprobe_bin
+    except ImportError:
+        pass
+
+    # 4. Tự động cài imageio-ffmpeg nếu chưa có
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "imageio-ffmpeg", "--quiet"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        import imageio_ffmpeg
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
+        if os.path.isfile(ffprobe_bin):
+            return ffprobe_bin
+    except Exception:
+        pass
+
+    return None  # Không tìm thấy
 
 
-def get_output_dir():
-    """
-    Trả về thư mục an toàn để ghi file output:
-    - macOS  : ~/Desktop (thư mục .app bị sandbox, không ghi được)
-    - Windows: cùng thư mục exe/script
-    """
-    if IS_MACOS:
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        return desktop if os.path.isdir(desktop) else os.path.expanduser("~")
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__)) or os.getcwd()
+FFPROBE_PATH = _find_ffprobe_path()
 
+
+def get_desktop_path():
+    """Trả về đường dẫn Desktop của user (macOS / Windows / Linux)."""
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+    if not os.path.isdir(desktop):
+        # Fallback về home nếu không có Desktop (headless CI)
+        desktop = os.path.expanduser("~")
+    return desktop
 
 # ==============================================================================
 # PHẦN LOGIC XỬ LÝ
@@ -113,31 +125,32 @@ def get_media_duration(file_path):
     if ext in DPX_CRI_EXTENSIONS:
         return None
 
-    ffprobe = get_ffprobe_path()
-    if not ffprobe:
+    if not FFPROBE_PATH:
         return None
 
     command = [
-        ffprobe, "-v", "error", "-show_entries", "format=duration",
+        FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", file_path
     ]
     try:
-        kwargs = dict(
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, check=False, encoding='utf-8', errors='ignore'
-        )
-        # STARTUPINFO chỉ có trên Windows - ẩn cửa sổ console khi spawn ffprobe
-        if IS_WINDOWS:
+        # Không dùng STARTUPINFO (Windows-only). Ẩn cửa sổ console trên Windows nếu có.
+        kwargs = {}
+        if sys.platform == "win32":
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            kwargs['startupinfo'] = si
+            kwargs["startupinfo"] = si
 
-        result = subprocess.run(command, **kwargs)
+        result = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            check=False, encoding='utf-8', errors='ignore', **kwargs
+        )
+
         if result.returncode != 0:
             return None
         return result.stdout.strip()
 
     except FileNotFoundError:
+        print(f"CRITICAL ERROR: ffprobe not found at: {FFPROBE_PATH}")
         return None
     except Exception as e:
         print(f"An unexpected error occurred in get_media_duration: {e}")
@@ -236,19 +249,7 @@ class MediaScannerApp:
         self.root.minsize(600, 400)
 
         style = ttk.Style(self.root)
-        # Theme phù hợp từng OS
-        if IS_WINDOWS:
-            try:
-                style.theme_use('vista')
-            except Exception:
-                style.theme_use('clam')
-        elif IS_MACOS:
-            try:
-                style.theme_use('aqua')
-            except Exception:
-                style.theme_use('clam')
-        else:
-            style.theme_use('clam')
+        style.theme_use('vista')
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -297,8 +298,8 @@ class MediaScannerApp:
             variable=self.ffprobe_var
         ).pack(anchor=tk.W, pady=(4, 0))
 
-        self.scan_button = ttk.Button(frame, text="▶  Bắt đầu quét & Xuất Excel",
-                                      command=self.start_scan_thread, width=25)
+        self.scan_button = ttk.Button(frame, text="▶  Bắt đầu quét & Xuất Excel", command=self.start_scan_thread,
+                                      width=25)
         self.scan_button.grid(row=4, column=0, columnspan=2, pady=12)
 
         self.progress = ttk.Progressbar(frame, orient=tk.HORIZONTAL, length=100, mode='determinate')
@@ -429,17 +430,17 @@ class MediaScannerApp:
         self._refresh_summary()
 
     def _convert_log_to_excel(self, txt_path, folder_summary):
-        """Chuyển đổi file log TXT thành file Excel và thêm sheet Tổng hợp"""
+        """Chuyển đổi file log TXT thành file Excel một cách tự động và thêm sheet Tổng hợp"""
         try:
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
             from openpyxl.utils import get_column_letter
         except ImportError:
             try:
-                pip_kwargs = {'args': [sys.executable, "-m", "pip", "install", "openpyxl"]}
-                if IS_WINDOWS:
-                    pip_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-                subprocess.check_call(**pip_kwargs)
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "openpyxl", "--quiet"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
                 import openpyxl
                 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
                 from openpyxl.utils import get_column_letter
@@ -477,9 +478,10 @@ class MediaScannerApp:
                     else:
                         for cell in ws1[row_idx]:
                             cell.border = thin_border
-                            if cell.column_letter != 'F':
+                            if cell.column_letter != 'F':  # Căn giữa trừ cột Đường dẫn
                                 cell.alignment = Alignment(horizontal="center", vertical="center")
 
+            # Tự động chỉnh độ rộng cột Sheet 1
             col_widths_s1 = {'A': 30, 'B': 10, 'C': 15, 'D': 15, 'E': 35, 'F': 60}
             for col_letter, width in col_widths_s1.items():
                 ws1.column_dimensions[col_letter].width = width
@@ -498,6 +500,7 @@ class MediaScannerApp:
 
             ws2.append(summary_columns)
 
+            # Format header Sheet 2
             for cell in ws2[1]:
                 cell.fill = header_fill
                 cell.font = header_font
@@ -517,21 +520,26 @@ class MediaScannerApp:
             for folder_path, ext_counts in folder_summary.items():
                 total = sum(ext_counts.values())
                 row_data = [folder_path, total]
+
+                # Đếm số lượng từng loại theo ext_map
                 for col in summary_columns[2:]:
                     cnt = sum(ext_counts.get(e, 0) for e in ext_map.get(col, []))
                     row_data.append(cnt if cnt > 0 else 0)
+
                 ws2.append(row_data)
 
+                # Format data rows
                 for c_idx, cell in enumerate(ws2[row_idx], start=1):
                     cell.border = thin_border
-                    if c_idx == 1:
+                    if c_idx == 1:  # Cột Folder căn trái
                         cell.alignment = Alignment(horizontal="left", vertical="center")
-                    else:
+                    else:  # Các cột số liệu căn giữa
                         cell.alignment = Alignment(horizontal="center", vertical="center")
                         if cell.value == 0:
-                            cell.font = Font(color="BBBBBB")
+                            cell.font = Font(color="BBBBBB")  # Làm mờ số 0 cho dễ nhìn
                 row_idx += 1
 
+            # Tự động chỉnh độ rộng cột Sheet 2
             ws2.column_dimensions['A'].width = 50
             for i in range(2, len(summary_columns) + 1):
                 col_letter = get_column_letter(i)
@@ -541,19 +549,18 @@ class MediaScannerApp:
             ws2.auto_filter.ref = ws2.dimensions
 
             # ------------------------------------------------------------------
-            # LƯU FILE EXCEL (cùng thư mục với TXT, thay đuôi .txt → .xlsx)
+            # LƯU FILE
             # ------------------------------------------------------------------
             xlsx_path = txt_path.replace(".txt", ".xlsx")
             wb.save(xlsx_path)
 
-            # Xóa file TXT tạm sau khi xuất Excel thành công
+            # Xóa file txt tạm sau khi xuất excel thành công
             try:
                 os.remove(txt_path)
-            except Exception:
+            except:
                 pass
 
             return xlsx_path
-
         except Exception as e:
             print(f"Lỗi khi lưu file Excel: {e}")
             return None
@@ -588,13 +595,13 @@ class MediaScannerApp:
                 self.update_status(f"Hoàn thành xuất Excel: {os.path.basename(excel_path)}")
                 messagebox.showinfo(
                     "Hoàn thành",
-                    f"{message}\n\nFile Excel đã được tạo tự động tại:\n{os.path.abspath(excel_path)}\n\n"
+                    f"{message}\n\nFile Excel chi tiết đã được tạo tự động tại:\n{os.path.abspath(excel_path)}\n\n"
                     f"File gồm 2 Sheet:\n- Chi tiết Media\n- Tổng hợp số lượng"
                 )
             else:
                 messagebox.showwarning(
                     "Lỗi xuất Excel",
-                    f"Quét thành công nhưng lỗi xuất Excel.\nDữ liệu TXT lưu tại:\n{os.path.abspath(output_file)}"
+                    f"Quét thành công nhưng lỗi xuất Excel. Dữ liệu TXT lưu tại:\n{os.path.abspath(output_file)}"
                 )
         else:
             if "Lỗi nghiêm trọng" in message:
@@ -617,13 +624,14 @@ class MediaScannerApp:
         if ":" in drive_name:
             drive_name = drive_name.replace(":", "")
         dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"Media_Scan_List_{drive_name}_{dt_str}.txt"
-        # Ghi vào Desktop trên macOS, tránh lỗi Errno 30 Read-only filesystem
-        output_filename = os.path.join(get_output_dir(), filename)
+        output_filename = f"Media_Scan_List_{drive_name}_{dt_str}.txt"
+
+        # Lưu file ra Desktop để tránh lỗi permission
+        output_file = os.path.join(get_desktop_path(), output_filename)
 
         scan_thread = threading.Thread(
             target=self.run_scan_in_background,
-            args=(mapped_drive, output_filename, self.md5_var.get(), self.ffprobe_var.get()),
+            args=(mapped_drive, output_file, self.md5_var.get(), self.ffprobe_var.get()),
             daemon=True
         )
         scan_thread.start()
@@ -637,25 +645,30 @@ class MediaScannerApp:
         self.root.after(0, self.scan_completed, message, file_count, output_file, folder_summary)
 
 
-# ==============================================================================
-# ENTRY POINT
-# ==============================================================================
-
 def check_ffprobe():
-    return get_ffprobe_path() is not None
+    if FFPROBE_PATH is None:
+        ans = messagebox.askyesno(
+            "Không tìm thấy FFmpeg",
+            "ffprobe không được tìm thấy trong PATH.\n\n"
+            "Chương trình vẫn có thể chạy nhưng:\n"
+            "  • Cột Thời lượng sẽ hiển thị N/A\n"
+            "  • Option 'Lấy thời lượng bằng ffprobe' sẽ bị tắt\n\n"
+            "Bạn có muốn tiếp tục không?"
+        )
+        return ans
+    return True
 
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = MediaScannerApp(root)
-    if not check_ffprobe():
+    if FFPROBE_PATH is None:
         app.ffprobe_var.set(False)
         messagebox.showwarning(
             "Không tìm thấy FFmpeg",
-            "ffprobe không được tìm thấy.\n\n"
+            "ffprobe không được tìm thấy trong PATH.\n\n"
             "Option 'Lấy thời lượng bằng ffprobe' đã được tắt tự động.\n"
             "Cột Thời lượng sẽ hiển thị N/A.\n\n"
-            "Để bật lại: đặt ffprobe cùng thư mục với chương trình,\n"
-            "hoặc cài FFmpeg và thêm vào PATH."
+            "Để bật lại: cài FFmpeg và thêm vào PATH, sau đó khởi động lại."
         )
     root.mainloop()
