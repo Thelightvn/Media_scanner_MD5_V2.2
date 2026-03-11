@@ -1,0 +1,98 @@
+name: Build macOS Intel (x86_64) — Free Tier / Cross-compile
+
+# ✅  OPTION B: Chạy trên runner ARM (macos-latest, FREE) nhưng
+#     cross-compile ra binary x86_64 Intel bằng --target-arch x86_64
+#     → Chạy được trên repo public / free tier hoàn toàn
+#     → Binary .app chạy được trên Mac Intel (x86_64)
+#     → Rosetta 2 cũng cho phép chạy trên Mac Apple Silicon
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-macos-intel-crosscompile:
+    runs-on: macos-latest   # Apple Silicon ARM (free), cross-compile → Intel x86_64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------ #
+      # Python x86_64 — cần bản x86_64 để PyInstaller tạo đúng binary
+      # ------------------------------------------------------------------ #
+      - name: Install Python 3.11 x86_64 via Homebrew (Intel arch)
+        run: |
+          # Cài Homebrew Intel prefix để lấy Python x86_64 trên ARM runner
+          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
+          # Dùng python.org universal2 installer thay thế (có sẵn x86_64 slice)
+          curl -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg" -o python_installer.pkg
+          sudo installer -pkg python_installer.pkg -target /
+          # Python universal2 được cài tại /Library/Frameworks/Python.framework
+          PYTHON_BIN="/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
+          echo "Python path : $PYTHON_BIN"
+          echo "Python arch : $(file $PYTHON_BIN)"
+          echo "PYTHON_BIN=$PYTHON_BIN" >> $GITHUB_ENV
+
+      # ------------------------------------------------------------------ #
+      # Lấy ffprobe Intel binary (x86_64) — dùng ffmpeg universal2/x86_64
+      # ------------------------------------------------------------------ #
+      - name: Download ffprobe x86_64 static binary
+        run: |
+          # Tải ffmpeg static build cho macOS x86_64 từ evermeet.cx
+          curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o ffprobe.zip
+          unzip -o ffprobe.zip -d ffprobe_bin
+          FFPROBE_BIN=$(find ffprobe_bin -name "ffprobe" -type f | head -1)
+          echo "Downloaded: $(file $FFPROBE_BIN)"
+          cp "$FFPROBE_BIN" ./ffprobe
+          chmod +x ./ffprobe
+          echo "ffprobe arch: $(file ./ffprobe)"
+
+      # ------------------------------------------------------------------ #
+      # Dùng Python x86_64 để cài pip packages + PyInstaller
+      # ------------------------------------------------------------------ #
+      - name: Install Python dependencies (x86_64 Python)
+        run: |
+          $PYTHON_BIN -m pip install --upgrade pip
+          $PYTHON_BIN -m pip install pyinstaller openpyxl imageio-ffmpeg
+
+      # ------------------------------------------------------------------ #
+      # Build x86_64 .app — PyInstaller dùng Python x86_64 + target-arch
+      # ------------------------------------------------------------------ #
+      - name: Build .app targeting Intel x86_64
+        run: |
+          $PYTHON_BIN -m PyInstaller \
+            --name "MediaScanner" \
+            --windowed \
+            --onefile \
+            --target-arch x86_64 \
+            --add-binary "ffprobe:." \
+            --hidden-import openpyxl \
+            --hidden-import openpyxl.styles \
+            --hidden-import openpyxl.utils \
+            --hidden-import imageio_ffmpeg \
+            --osx-bundle-identifier "com.mediascanner.app" \
+            Media_scanner_MD5_V2_2.py
+
+      - name: Verify output binary is x86_64
+        run: |
+          APP_BIN="dist/MediaScanner.app/Contents/MacOS/MediaScanner"
+          echo "=== file output ==="
+          file "$APP_BIN"
+          echo "=== lipo info ==="
+          lipo -info "$APP_BIN"
+
+      - name: Zip .app bundle
+        run: |
+          cd dist && zip -r MediaScanner_macOS_Intel.zip MediaScanner.app
+          ls -lh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaScanner-macOS-Intel-x86_64
+          path: dist/MediaScanner_macOS_Intel.zip
+          retention-days: 30
