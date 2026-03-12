@@ -41,9 +41,10 @@ jobs:
       - name: Download ffprobe x86_64 static binary
         run: |
           curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o ffprobe.zip
-          unzip -o ffprobe.zip
-          FFPROBE=$(find . -maxdepth 3 -name "ffprobe" -not -path "*/dist/*" -type f | head -1)
-          cp "$FFPROBE" ./ffprobe
+          # Unzip vào thư mục con riêng để tránh cp: identical file error
+          mkdir -p ffprobe_dl
+          unzip -o ffprobe.zip -d ffprobe_dl
+          cp ffprobe_dl/ffprobe ./ffprobe
           chmod +x ./ffprobe
           echo "ffprobe arch: $(file ./ffprobe)"
           file ./ffprobe | grep -q "x86_64" && echo "OK: x86_64" || echo "WARNING: not x86_64"
