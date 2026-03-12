@@ -249,7 +249,12 @@ class MediaScannerApp:
         self.root.minsize(600, 400)
 
         style = ttk.Style(self.root)
-        style.theme_use('vista')
+        # 'vista' là theme Windows-only, crash trên macOS
+        available = style.theme_names()
+        for preferred in ('aqua', 'clam', 'alt', 'default'):
+            if preferred in available:
+                style.theme_use(preferred)
+                break
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -660,15 +665,57 @@ def check_ffprobe():
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = MediaScannerApp(root)
-    if FFPROBE_PATH is None:
-        app.ffprobe_var.set(False)
-        messagebox.showwarning(
-            "Không tìm thấy FFmpeg",
-            "ffprobe không được tìm thấy trong PATH.\n\n"
-            "Option 'Lấy thời lượng bằng ffprobe' đã được tắt tự động.\n"
-            "Cột Thời lượng sẽ hiển thị N/A.\n\n"
-            "Để bật lại: cài FFmpeg và thêm vào PATH, sau đó khởi động lại."
-        )
-    root.mainloop()
+    try:
+        root = tk.Tk()
+
+        # macOS: đưa cửa sổ lên foreground khi chạy từ .app bundle
+        if sys.platform == "darwin":
+            try:
+                # AppleScript để focus app (cần khi launch từ Finder)
+                subprocess.Popen(
+                    ['osascript', '-e',
+                     'tell application "System Events" to set frontmost of every process whose unix id is '
+                     + str(os.getpid()) + ' to true'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except Exception:
+                pass
+            root.lift()
+            root.attributes('-topmost', True)
+            root.after(500, lambda: root.attributes('-topmost', False))
+
+        app = MediaScannerApp(root)
+
+        if FFPROBE_PATH is None:
+            app.ffprobe_var.set(False)
+            messagebox.showwarning(
+                "Không tìm thấy FFmpeg",
+                "ffprobe không được tìm thấy trong PATH.\n\n"
+                "Option 'Lấy thời lượng bằng ffprobe' đã được tắt tự động.\n"
+                "Cột Thời lượng sẽ hiển thị N/A.\n\n"
+                "Để bật lại: cài FFmpeg và thêm vào PATH, sau đó khởi động lại."
+            )
+
+        root.mainloop()
+
+    except Exception as e:
+        import traceback
+        # Ghi crash log ra Desktop để dễ debug
+        log_path = os.path.join(os.path.expanduser("~"), "Desktop", "MediaScanner_crash.log")
+        try:
+            with open(log_path, 'w', encoding='utf-8') as f:
+                f.write(f"MediaScanner Crash Log\n{'='*40}\n")
+                f.write(traceback.format_exc())
+            # Hiện dialog lỗi nếu tk còn hoạt động
+            try:
+                import tkinter.messagebox as mb
+                _r = tk.Tk()
+                _r.withdraw()
+                mb.showerror("Lỗi khởi động",
+                             f"App bị crash:\n{e}\n\nXem chi tiết tại:\n{log_path}")
+                _r.destroy()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        raise
