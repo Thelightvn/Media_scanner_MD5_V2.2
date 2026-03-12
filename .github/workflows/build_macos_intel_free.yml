@@ -1,10 +1,4 @@
-name: Build macOS Intel (x86_64) — Free Tier / Cross-compile
-
-# ✅  OPTION B: Chạy trên runner ARM (macos-latest, FREE) nhưng
-#     cross-compile ra binary x86_64 Intel bằng --target-arch x86_64
-#     → Chạy được trên repo public / free tier hoàn toàn
-#     → Binary .app chạy được trên Mac Intel (x86_64)
-#     → Rosetta 2 cũng cho phép chạy trên Mac Apple Silicon
+name: Build macOS Intel (x86_64) — Free Tier
 
 on:
   push:
@@ -14,57 +8,79 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-macos-intel-crosscompile:
-    runs-on: macos-latest   # Apple Silicon ARM (free), cross-compile → Intel x86_64
+  build-macos-intel:
+    runs-on: macos-latest   # ARM runner, cross-compile sang Intel x86_64
 
     steps:
+      # ------------------------------------------------------------------ #
+      # 1. Checkout
+      # ------------------------------------------------------------------ #
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------------ #
-      # Python x86_64 — cần bản x86_64 để PyInstaller tạo đúng binary
+      # 2. Cài Python 3.11 universal2 (có slice x86_64 để cross-compile)
       # ------------------------------------------------------------------ #
-      - name: Install Python 3.11 x86_64 via Homebrew (Intel arch)
+      - name: Install Python 3.11 universal2
         run: |
-          # Cài Homebrew Intel prefix để lấy Python x86_64 trên ARM runner
-          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
-          # Dùng python.org universal2 installer thay thế (có sẵn x86_64 slice)
-          curl -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg" -o python_installer.pkg
+          curl -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg" \
+               -o python_installer.pkg
           sudo installer -pkg python_installer.pkg -target /
-          # Python universal2 được cài tại /Library/Frameworks/Python.framework
-          PYTHON_BIN="/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
-          echo "Python path : $PYTHON_BIN"
-          echo "Python arch : $(file $PYTHON_BIN)"
-          echo "PYTHON_BIN=$PYTHON_BIN" >> $GITHUB_ENV
+          PYTHON="/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
+          echo "PYTHON=$PYTHON" >> $GITHUB_ENV
+          echo "Python: $($PYTHON --version)"
+          echo "Arch  : $(file $PYTHON)"
 
       # ------------------------------------------------------------------ #
-      # Lấy ffprobe Intel binary (x86_64) — dùng ffmpeg universal2/x86_64
+      # 3. Download ffprobe x86_64 static binary
       # ------------------------------------------------------------------ #
       - name: Download ffprobe x86_64 static binary
         run: |
-          # Tải ffmpeg static build cho macOS x86_64 từ evermeet.cx
           curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o ffprobe.zip
-          unzip -o ffprobe.zip -d ffprobe_bin
-          FFPROBE_BIN=$(find ffprobe_bin -name "ffprobe" -type f | head -1)
-          echo "Downloaded: $(file $FFPROBE_BIN)"
-          cp "$FFPROBE_BIN" ./ffprobe
+          unzip -o ffprobe.zip
+          FFPROBE=$(find . -maxdepth 3 -name "ffprobe" -type f | head -1)
+          cp "$FFPROBE" ./ffprobe
           chmod +x ./ffprobe
           echo "ffprobe arch: $(file ./ffprobe)"
+          file ./ffprobe | grep -q "x86_64" && echo "OK: x86_64" || echo "WARNING: not x86_64"
 
       # ------------------------------------------------------------------ #
-      # Dùng Python x86_64 để cài pip packages + PyInstaller
+      # 4. Cài pip dependencies bằng Python x86_64
       # ------------------------------------------------------------------ #
-      - name: Install Python dependencies (x86_64 Python)
+      - name: Install Python dependencies
         run: |
-          $PYTHON_BIN -m pip install --upgrade pip
-          $PYTHON_BIN -m pip install pyinstaller openpyxl imageio-ffmpeg
+          $PYTHON -m pip install --upgrade pip
+          $PYTHON -m pip install pyinstaller openpyxl imageio-ffmpeg
 
       # ------------------------------------------------------------------ #
-      # Build x86_64 .app — PyInstaller dùng Python x86_64 + target-arch
+      # 5. Tạo entitlements.plist (tránh macOS kill app khi launch)
       # ------------------------------------------------------------------ #
-      - name: Build .app targeting Intel x86_64
+      - name: Create entitlements.plist
         run: |
-          $PYTHON_BIN -m PyInstaller \
+          cat > entitlements.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+            <true/>
+            <key>com.apple.security.cs.disable-library-validation</key>
+            <true/>
+            <key>com.apple.security.files.user-selected.read-write</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+      # ------------------------------------------------------------------ #
+      # 6. Build .app — target x86_64 Intel
+      # ------------------------------------------------------------------ #
+      - name: Build .app with PyInstaller (target x86_64)
+        run: |
+          $PYTHON -m PyInstaller \
             --name "MediaScanner" \
             --windowed \
             --onefile \
@@ -77,17 +93,36 @@ jobs:
             --osx-bundle-identifier "com.mediascanner.app" \
             Media_scanner_MD5_V2_2.py
 
-      - name: Verify output binary is x86_64
+      # ------------------------------------------------------------------ #
+      # 7. Ad-hoc codesign với entitlements (tránh bị macOS Gatekeeper kill)
+      # ------------------------------------------------------------------ #
+      - name: Codesign app bundle (ad-hoc)
+        run: |
+          APP="dist/MediaScanner.app"
+          codesign --force --deep --sign - \
+            --entitlements entitlements.plist \
+            --options runtime \
+            "$APP"
+          echo "=== Codesign verify ==="
+          codesign --verify --verbose "$APP" || true
+
+      # ------------------------------------------------------------------ #
+      # 8. Verify architecture
+      # ------------------------------------------------------------------ #
+      - name: Verify output binary architecture
         run: |
           APP_BIN="dist/MediaScanner.app/Contents/MacOS/MediaScanner"
-          echo "=== file output ==="
           file "$APP_BIN"
-          echo "=== lipo info ==="
           lipo -info "$APP_BIN"
+          file "$APP_BIN" | grep -q "x86_64" && echo "OK: Intel x86_64" || echo "FAIL: wrong arch"
 
+      # ------------------------------------------------------------------ #
+      # 9. Zip & upload
+      # ------------------------------------------------------------------ #
       - name: Zip .app bundle
         run: |
-          cd dist && zip -r MediaScanner_macOS_Intel.zip MediaScanner.app
+          cd dist
+          zip -r --symlinks MediaScanner_macOS_Intel.zip MediaScanner.app
           ls -lh
 
       - name: Upload artifact
