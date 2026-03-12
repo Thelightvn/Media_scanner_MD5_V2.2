@@ -1,0 +1,115 @@
+name: Build macOS Intel (x86_64)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+# Opt-in Node.js 24 để tránh deprecation warning
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-macos-intel:
+    runs-on: macos-latest   # ARM runner, cross-compile sang Intel x86_64
+
+    steps:
+      # ------------------------------------------------------------------ #
+      # 1. Checkout — dùng @v5 (Node.js 24, tránh warning deprecation)
+      # ------------------------------------------------------------------ #
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # ------------------------------------------------------------------ #
+      # 2. Cài Python 3.11 universal2 (có slice x86_64 để cross-compile)
+      # ------------------------------------------------------------------ #
+      - name: Install Python 3.11 universal2
+        run: |
+          curl -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg" \
+               -o python_installer.pkg
+          sudo installer -pkg python_installer.pkg -target /
+          PYTHON="/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
+          echo "PYTHON=$PYTHON" >> $GITHUB_ENV
+          echo "Python : $($PYTHON --version)"
+          echo "Arch   : $(file $PYTHON)"
+
+      # ------------------------------------------------------------------ #
+      # 3. Download ffprobe x86_64 static binary
+      # ------------------------------------------------------------------ #
+      - name: Download ffprobe x86_64 static binary
+        run: |
+          curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o ffprobe.zip
+          unzip -o ffprobe.zip
+          FFPROBE=$(find . -maxdepth 3 -name "ffprobe" -not -path "*/dist/*" -type f | head -1)
+          cp "$FFPROBE" ./ffprobe
+          chmod +x ./ffprobe
+          echo "ffprobe arch: $(file ./ffprobe)"
+          file ./ffprobe | grep -q "x86_64" && echo "OK: x86_64" || echo "WARNING: not x86_64"
+
+      # ------------------------------------------------------------------ #
+      # 4. Cài pip dependencies
+      # ------------------------------------------------------------------ #
+      - name: Install Python dependencies
+        run: |
+          $PYTHON -m pip install --upgrade pip
+          $PYTHON -m pip install pyinstaller openpyxl imageio-ffmpeg
+
+      # ------------------------------------------------------------------ #
+      # 5. Build .app — target x86_64 Intel
+      # ------------------------------------------------------------------ #
+      - name: Build .app with PyInstaller (target x86_64)
+        run: |
+          $PYTHON -m PyInstaller \
+            --name "MediaScanner" \
+            --windowed \
+            --onefile \
+            --target-arch x86_64 \
+            --add-binary "ffprobe:." \
+            --hidden-import openpyxl \
+            --hidden-import openpyxl.styles \
+            --hidden-import openpyxl.utils \
+            --hidden-import imageio_ffmpeg \
+            --osx-bundle-identifier "com.mediascanner.app" \
+            Media_scanner_MD5_V2_2.py
+
+      # ------------------------------------------------------------------ #
+      # 6. Ad-hoc codesign — KHÔNG dùng --options runtime (cần Apple cert)
+      #    Ad-hoc sign chỉ cần --sign - và --deep là đủ
+      # ------------------------------------------------------------------ #
+      - name: Codesign app bundle (ad-hoc)
+        run: |
+          APP="dist/MediaScanner.app"
+          # Xóa extended attributes có thể gây lỗi codesign
+          xattr -cr "$APP"
+          # Ad-hoc sign: --sign - = dùng local identity, KHÔNG cần cert
+          codesign --force --deep --sign - "$APP"
+          echo "=== Verify ==="
+          codesign --verify --verbose "$APP"
+
+      # ------------------------------------------------------------------ #
+      # 7. Verify architecture
+      # ------------------------------------------------------------------ #
+      - name: Verify output binary architecture
+        run: |
+          APP_BIN="dist/MediaScanner.app/Contents/MacOS/MediaScanner"
+          file "$APP_BIN"
+          lipo -info "$APP_BIN"
+          file "$APP_BIN" | grep -q "x86_64" && echo "OK: Intel x86_64" || echo "FAIL: wrong arch"
+
+      # ------------------------------------------------------------------ #
+      # 8. Zip & upload — dùng @v5 (Node.js 24)
+      # ------------------------------------------------------------------ #
+      - name: Zip .app bundle
+        run: |
+          cd dist
+          zip -r --symlinks MediaScanner_macOS_Intel.zip MediaScanner.app
+          ls -lh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: MediaScanner-macOS-Intel-x86_64
+          path: dist/MediaScanner_macOS_Intel.zip
+          retention-days: 30
